@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Locally captured device baselines contain real BLE MAC addresses and
+# advertised names of whatever hardware you've actually run --baseline
+# against - personal device data, never meant to be committed.
+data/device_baselines.json
+
+# Claude Code's own local dev-environment config: personal permission
+# history, absolute paths, and locally-run commands specific to this
+# machine - not part of the tool itself.
+.claude/settings.local.json

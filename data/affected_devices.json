@@ -1,0 +1,13 @@
+{
+  "devices": [
+    {
+      "brand": "Sony",
+      "model": "WF-1000XM3",
+      "address_prefix": "94:DB:56",
+      "airoha_soc": "AB1562",
+      "cves": ["CVE-2025-20700", "CVE-2025-20701", "CVE-2025-20702"],
+      "patched_firmware": null,
+      "notes": "TWS earbuds; confirmed affected by ERNW advisory. Address prefix verified by live BLE scan against a physical test unit (advertises as LE_WF-1000XM3)."
+    }
+  ]
+}
