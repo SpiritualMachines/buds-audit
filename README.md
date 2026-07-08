@@ -1,6 +1,6 @@
 # buds-audit
 
-**Version 0.5.0**
+**Version 0.9.0**
 
 Bluetooth security assessment tool for wireless earbuds affected by the
 Airoha SDK vulnerability chain (CVE-2025-20700 / CVE-2025-20701 /
@@ -14,10 +14,19 @@ protocol reachability - entirely through the OS Bluetooth stack (BlueZ) via
 This tool is for assessing devices you own or have explicit authorisation to
 test. GATT and RACE probing are active operations: they connect to and send
 commands to the target device. Do not run `--gatt`, `--race`, `--firmware`,
-`--assess`, `--baseline`, or `--check-drift` against a device that isn't
-yours or that you haven't been given permission to test. `--scan` is passive
-and only listens to advertisements already being broadcast publicly, so it's
-safe to run against whatever's in range.
+`--bd-address`, `--assess`, `--baseline`, `--check-drift`, or `--memory-read`
+against a device that isn't yours or that you haven't been given permission
+to test. `--scan` is passive and only listens to advertisements already
+being broadcast publicly, so it's safe to run against whatever's in range.
+
+`--memory-read` goes a step further than the other active probes: it
+retrieves one real, read-only page (256 bytes) of the device's actual flash
+content, at a fixed address, as a definitive confirmation of CVE-2025-20702
+when the reachability-only `--race` probe gets no response. It is read-only
+(flash reads carry no wear or bricking risk, unlike write/erase/FOTA
+commands, which this tool never sends), opt-in, and requires its own
+separate confirmation beyond the standard ownership prompt describing
+exactly what it does before it runs anything.
 
 Probing an arbitrary nearby device isn't just a policy concern - it can have
 real side effects. `--gatt` attempts a read or notify-subscribe on every
@@ -92,6 +101,19 @@ though - some vendors use resolvable private addresses even in
 pre-pairing/reconnect mode, which would appear as a different address after
 each power cycle to an unpaired scanner like this tool.
 
+The GATT probe (`--gatt`, and the GATT stage of `--assess`) can need several
+reconnects if the device has characteristics that require pairing - each one
+makes BlueZ attempt (and this tool's own agent reject) a real pairing
+negotiation before reconnecting to resume the sweep, and prints a one-line
+status before each attempt so a slow sweep doesn't look hung. Live testing
+against the confirmed test device also saw completeness degrade over a
+single session of repeated heavy testing, recovering after the device was
+left to rest for a few hours - whether that's the device's own connection-
+layer throttling or just cumulative BLE-stack stress from repeated forced
+disconnects isn't resolved yet. If a sweep comes back with fewer findings
+than a previous run against the same device, try again after giving it a
+rest before assuming something changed.
+
 ## Interactive mode
 
 ```bash
@@ -110,13 +132,17 @@ requiring you to already know a BLE address or which flag does what:
 
 Option 1 scans for nearby known-affected devices and lists them for you to
 pick by number (rather than typing a MAC address), runs the full CVE audit
-(same as `--assess`), and saves a baseline (same as `--baseline`) so future
-runs can detect changes. Option 2 lists devices you've already baselined
-and re-checks the one you pick for drift (same as `--check-drift`). Option
-3 is `--watch`. Every option still goes through the same ownership
-confirmation as the flag-based interface before touching the radio - the
-wizard is a friendlier front end over the exact same underlying checks, not
-a separate, less careful path.
+(same as `--assess`, including the BD-address query), and saves a baseline
+(same as `--baseline`) so future runs can detect changes. It also asks the
+same memory-read question `--assess --memory-read` answers via its
+confirmation prompt - answering yes there includes the same real, read-only
+RACE flash-page read described above; answering no just runs the audit
+without it, it doesn't cancel the whole analysis. Option 2 lists devices
+you've already baselined and re-checks the one you pick for drift (same as
+`--check-drift`). Option 3 is `--watch`. Every option still goes through
+the same ownership confirmation as the flag-based interface before
+touching the radio - the wizard is a friendlier front end over the exact
+same underlying checks, not a separate, less careful path.
 
 The flag-based interface below is still there for scripted use or anyone
 who already knows the address they want to target.
@@ -154,22 +180,64 @@ that one device:
 buds_audit.py --gatt --target AA:BB:CC:DD:EE:FF       # CVE-2025-20700: unauthenticated GATT access
 buds_audit.py --race --target AA:BB:CC:DD:EE:FF       # CVE-2025-20702: RACE channel reachability
 buds_audit.py --firmware --target AA:BB:CC:DD:EE:FF   # CVE-2025-20701: passive firmware/pairing-bypass check
+buds_audit.py --bd-address --target AA:BB:CC:DD:EE:FF # Classic BD address via RACE, informational
 ```
 
-All three skip cleanly (no error) if the device is already paired - an
+All four skip cleanly (no error) if the device is already paired - an
 "unauthenticated access" finding is meaningless against a bonded device.
+
+`--gatt` now shows the actual value returned by each successful unpaired
+read or notification (hex-encoded), not just that the read succeeded - the
+value was already being retrieved, so this is no additional risk, just no
+longer discarded.
+
+`--race` only tests reachability (a benign SDK-info query, no memory
+access) - a RACE service can be present and accept the write cleanly but
+still not reply, which is a genuinely inconclusive result, not evidence of
+anything fixed. For a definitive answer, see `--memory-read` below.
+
+`--bd-address` is informational, not a vulnerability finding on its own: it
+queries the device's real Bluetooth Classic (BR/EDR) address over the same
+unauthenticated RACE channel, same risk shape as `--firmware`'s buildversion
+query (a zero-payload metadata command). Useful if you want to pursue
+CVE-2025-20701 active testing yourself with a Classic-capable radio/dongle,
+since this tool has no Classic transport of its own - see the Hardware
+requirement section below.
+
+### Memory-read confirmation (opt-in)
+
+```bash
+buds_audit.py --memory-read --target AA:BB:CC:DD:EE:FF
+```
+
+Attempts one real, read-only RACE flash-page read (256 bytes, from a fixed
+address) for a definitive CVE-2025-20702 confirmation - useful when
+`--race` finds the RACE service present but unresponsive to its benign
+query. This is opt-in and separate from `--race` on purpose: a success here
+retrieves real device firmware content, not just a yes/no signal about
+whether the channel is reachable. It never writes, erases, extracts link
+keys, or reads RAM/registers (only flash, which has no read side effects) -
+see ROADMAP.md's Phase 8 and Out of Scope sections for the full reasoning.
+It requires its own separate confirmation, describing exactly what it does,
+beyond the standard ownership prompt.
 
 ### Full assessment
 
 ```bash
 buds_audit.py --assess --target AA:BB:CC:DD:EE:FF
 buds_audit.py --assess --target AA:BB:CC:DD:EE:FF --json result.json
+buds_audit.py --assess --target AA:BB:CC:DD:EE:FF --memory-read
 ```
 
-Runs all three probes above against one target and produces a single
-verdict: `PASS`, `PARTIAL`, `VULNERABLE`, or `SUSPECTED_COMPROMISE`. `--json`
-additionally writes the full result (device info, verdict, flags, evidence,
-remediation notes) to a file.
+Runs the GATT, RACE, firmware, and BD-address probes above against one
+target and produces a single verdict: `PASS`, `PARTIAL`, `VULNERABLE`, or
+`SUSPECTED_COMPROMISE`. `--json` additionally writes the full result
+(device info, verdict, flags, evidence, remediation notes) to a file.
+Adding `--memory-read` folds the memory-read confirmation into the same
+audit and verdict, with its own separate confirmation prompt first. The
+BD-address query runs automatically as part of `--assess` (no separate flag
+needed, no extra confirmation prompt) since it's the same low-risk
+metadata-query shape as the firmware check.
 
 `--assess` is deliberately single-target only, same as the individual
 probes - there's no "assess every device in range" mode, since that would

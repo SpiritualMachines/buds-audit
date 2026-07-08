@@ -31,9 +31,11 @@ from core.report import (
     assessment_to_dict,
     print_assessment_result,
     print_baseline_captured,
+    print_bd_address_results,
     print_firmware_results,
     print_gatt_results,
     print_impersonation_results,
+    print_memory_read_results,
     print_race_results,
     print_scan_results,
 )
@@ -42,6 +44,17 @@ from core.rules import assess_device
 AFFECTED_DEVICES_PATH = Path(__file__).parent / "data" / "affected_devices.json"
 BASELINES_PATH = Path(__file__).parent / "data" / "device_baselines.json"
 SCAN_TIMEOUT = 10.0
+# --assess opens several separate connections back-to-back against the same
+# address. Confirmed live against this project's own Sony WF-1000XM3:
+# reconnecting immediately after the previous probe's disconnect can produce
+# "failed to discover services, device disconnected" (BlueZ/bleak accepts
+# the connection, then the peripheral drops it again before GATT service
+# discovery finishes) - reproduced with the phone's Bluetooth off and the
+# earbuds freshly woken, ruling out both idle/sleep and a competing
+# reconnect as the cause. A brief pause between probes gives the
+# peripheral's BLE stack a moment to settle after a disconnect before the
+# next connection attempt.
+INTER_PROBE_SETTLE_SECONDS = 1.5
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -89,6 +102,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--bd-address",
+        action="store_true",
+        help=(
+            "Query the device's Bluetooth Classic (BR/EDR) address via RACE "
+            "(informational; same low-risk metadata-query shape as "
+            "--firmware, no dongle required, always included in --assess). "
+            "Useful for pursuing CVE-2025-20701 active testing with your "
+            "own Classic-capable radio/tooling, since this tool has no "
+            "Classic transport of its own."
+        ),
+    )
+    parser.add_argument(
+        "--memory-read",
+        action="store_true",
+        help=(
+            "Attempt one real, read-only RACE flash-page read against --target "
+            "for a definitive CVE-2025-20702 confirmation (opt-in, standalone, "
+            "or combined with --assess to add it to the full audit). Never "
+            "writes, erases, or extracts link keys - but unlike --race, a "
+            "success retrieves real device firmware content, not just a "
+            "yes/no reachability signal, so it requires its own separate "
+            "confirmation beyond the standard ownership prompt."
+        ),
+    )
+    parser.add_argument(
         "--json",
         metavar="FILE",
         help="With --assess, also write the assessment result to FILE as JSON.",
@@ -125,8 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Skip the ownership confirmation prompt before --gatt/--race/"
-            "--firmware/--assess/--baseline/--check-drift. For scripted use "
-            "only."
+            "--firmware/--bd-address/--assess/--baseline/--check-drift, and "
+            "the additional --memory-read-specific warning. For scripted "
+            "use only."
         ),
     )
     return parser
@@ -152,6 +191,31 @@ def _confirm_authorized(target: str) -> bool:
     return response.strip().lower() in ("y", "yes")
 
 
+_MEMORY_READ_WARNING = (
+    "\n--memory-read performs a real memory access: it will read {size} "
+    "bytes of actual device flash content from address {address:#010x} over "
+    "the RACE channel, without pairing. This is read-only - flash reads "
+    "carry no wear or bricking risk, unlike the write/erase/FOTA commands "
+    "this tool never sends - but it goes beyond a reachability check: a "
+    "success retrieves real firmware bytes, not just a yes/no signal.\n"
+    "Proceed with a real memory read against {target} [y/N]: "
+)
+
+
+def _confirm_memory_read(target: str) -> bool:
+    # Lazy import: only needed when --memory-read is actually used, and by
+    # then the caller is about to need bleak for the probe itself anyway -
+    # see this module's docstring for why core.race isn't imported at the top.
+    from core.race import FLASH_READ_PAGE_SIZE, FLASH_READ_TEST_ADDRESS
+
+    response = input(
+        _MEMORY_READ_WARNING.format(
+            size=FLASH_READ_PAGE_SIZE, address=FLASH_READ_TEST_ADDRESS, target=target
+        )
+    )
+    return response.strip().lower() in ("y", "yes")
+
+
 async def _async_input(prompt: str) -> str:
     """input() that doesn't block the asyncio event loop.
 
@@ -172,6 +236,35 @@ async def _confirm_authorized_async(target: str) -> bool:
     """Wizard equivalent of _confirm_authorized - see _async_input for why
     the wizard can't use the plain blocking version."""
     response = await _async_input(_OWNERSHIP_PROMPT.format(target=target))
+    return response.strip().lower() in ("y", "yes")
+
+
+_WIZARD_MEMORY_READ_OFFER = (
+    "\nThis audit can optionally include a definitive CVE-2025-20702 check: "
+    "one real, read-only RACE flash-page read ({size} bytes from address "
+    "{address:#010x}), useful since the reachability-only RACE check alone "
+    "can be inconclusive (a service that's present but silent). This is "
+    "read-only - flash reads carry no wear or bricking risk, unlike the "
+    "write/erase/FOTA commands this tool never sends - but a success "
+    "retrieves real device firmware content, not just a yes/no signal.\n"
+    "Include the memory-read check against {target} [y/N]: "
+)
+
+
+async def _confirm_memory_read_async(target: str) -> bool:
+    """Wizard equivalent of _confirm_memory_read, but framed as an optional
+    addition to offer rather than confirming an explicit --memory-read flag
+    the user already passed - declining here means "run the audit without
+    it," not "cancel the whole audit" (unlike main()'s --memory-read
+    handling, where declining aborts the whole command, since there the
+    user already asked for it specifically)."""
+    from core.race import FLASH_READ_PAGE_SIZE, FLASH_READ_TEST_ADDRESS
+
+    response = await _async_input(
+        _WIZARD_MEMORY_READ_OFFER.format(
+            size=FLASH_READ_PAGE_SIZE, address=FLASH_READ_TEST_ADDRESS, target=target
+        )
+    )
     return response.strip().lower() in ("y", "yes")
 
 
@@ -213,7 +306,7 @@ async def run_gatt(target: str) -> None:
 
     try:
         async with no_pairing_agent():
-            flags = await probe_gatt(target)
+            flags, unreached = await probe_gatt(target, on_progress=print)
     except AgentRegistrationError as exc:
         print(f"GATT probe aborted: {exc}")
         return
@@ -221,6 +314,13 @@ async def run_gatt(target: str) -> None:
         print(f"GATT probe skipped: {exc}")
         return
 
+    if unreached:
+        print(
+            f"GATT probe incomplete: {unreached} characteristic(s) never "
+            "reached after repeated reconnects - results below may be a "
+            "subset of this device's full GATT exposure, not the complete "
+            "picture."
+        )
     print_gatt_results(target, flags)
 
 
@@ -244,6 +344,50 @@ async def run_race(target: str) -> None:
         return
 
     print_race_results(target, service_found, flags)
+
+
+async def run_memory_read(target: str) -> None:
+    """Single-target, opt-in CVE-2025-20702 confirmation via one real,
+    read-only RACE flash-page read - see core/race.py's probe_memory_read
+    docstring for why this is bounded/read-only and kept separate from
+    probe_race (reachability only). no_pairing_agent guards the probe -
+    see run_gatt / core/agent.py."""
+    from core.agent import AgentRegistrationError, no_pairing_agent
+    from core.race import RaceProbeError, probe_memory_read
+
+    try:
+        async with no_pairing_agent():
+            service_found, flags, note = await probe_memory_read(target)
+    except AgentRegistrationError as exc:
+        print(f"Memory-read probe aborted: {exc}")
+        return
+    except RaceProbeError as exc:
+        print(f"Memory-read probe skipped: {exc}")
+        return
+
+    print_memory_read_results(target, service_found, flags, note)
+
+
+async def run_bd_address(target: str) -> None:
+    """Single-target, informational Bluetooth Classic BD-address query via
+    RACE - see core/race.py's probe_bd_address docstring for why this is a
+    zero-payload metadata query (same risk shape as --firmware) rather than
+    something needing --memory-read's extra confirmation gate.
+    no_pairing_agent guards the probe - see run_gatt / core/agent.py."""
+    from core.agent import AgentRegistrationError, no_pairing_agent
+    from core.race import RaceProbeError, probe_bd_address
+
+    try:
+        async with no_pairing_agent():
+            service_found, bd_address, note = await probe_bd_address(target)
+    except AgentRegistrationError as exc:
+        print(f"BD-address query aborted: {exc}")
+        return
+    except RaceProbeError as exc:
+        print(f"BD-address query skipped: {exc}")
+        return
+
+    print_bd_address_results(target, service_found, bd_address, note)
 
 
 async def run_firmware(target: str) -> None:
@@ -274,20 +418,53 @@ async def run_firmware(target: str) -> None:
     print_firmware_results(target, version, flags)
 
 
-async def run_assess(target: str, json_path: str | None) -> None:
+async def run_assess(
+    target: str, json_path: str | None, include_memory_read: bool = False
+) -> None:
     """Run all three probes against one target and roll the results into a
     single verdict. is_paired is checked once up front as a fast skip
     before running anything; each probe still catches its own
     GattProbeError/RaceProbeError independently afterwards rather than
     letting one failure abort the whole assessment, so e.g. a RACE
     connection timeout still leaves the GATT findings intact in the final
-    verdict instead of losing them. All three probes share a single
+    verdict instead of losing them. All probes share a single
     no_pairing_agent registration rather than one each, so the reject-all
     agent stays in place continuously across the whole assessment instead
-    of leaving gaps between probes - see run_gatt / core/agent.py."""
+    of leaving gaps between probes - see run_gatt / core/agent.py.
+
+    include_memory_read adds the opt-in, real flash-page read
+    (probe_memory_read) to the audit - see main()'s --memory-read handling
+    for why that requires its own separate confirmation before getting here.
+
+    probe_bd_address always runs (no toggle, unlike memory-read) - it's the
+    same zero-payload metadata-query risk shape as probe_firmware_version,
+    not something that needs an extra confirmation gate.
+
+    INTER_PROBE_SETTLE_SECONDS pauses between each probe's separate
+    connect/disconnect cycle - see its own comment for the live-confirmed
+    reason (reconnecting immediately after a disconnect can make the
+    peripheral drop the new connection again before service discovery
+    finishes).
+
+    probe_gatt deliberately runs LAST, not first: confirmed live, its
+    per-characteristic notify sweep can trigger BlueZ's own
+    StartNotify-then-Insufficient-Encryption-then-failed-pairing sequence on
+    a characteristic that requires security - and BlueZ appears to retain
+    that "wants notifications" intent afterward, automatically retrying it
+    (and the resulting forced disconnect) on every subsequent reconnect to
+    this device for the rest of the bluetoothd process's life, regardless of
+    which probe initiates the reconnect. Running the RACE/BD-address/
+    firmware probes first, before probe_gatt's sweep has a chance to trigger
+    this, gives them a clean shot at a stable connection."""
     from core.agent import AgentRegistrationError, no_pairing_agent
     from core.gatt import GattProbeError, is_paired, probe_gatt
-    from core.race import RaceProbeError, probe_firmware_version, probe_race
+    from core.race import (
+        RaceProbeError,
+        probe_bd_address,
+        probe_firmware_version,
+        probe_memory_read,
+        probe_race,
+    )
 
     if await is_paired(target):
         print(
@@ -303,19 +480,38 @@ async def run_assess(target: str, json_path: str | None) -> None:
 
     flags: list[RuleFlag] = []
     version: str | None = None
+    bd_address: str | None = None
 
     try:
         async with no_pairing_agent():
-            try:
-                flags.extend(await probe_gatt(target))
-            except GattProbeError as exc:
-                print(f"GATT probe skipped: {exc}")
-
             try:
                 _, race_flags = await probe_race(target)
                 flags.extend(race_flags)
             except RaceProbeError as exc:
                 print(f"RACE probe skipped: {exc}")
+
+            await asyncio.sleep(INTER_PROBE_SETTLE_SECONDS)
+
+            try:
+                _, bd_address, bd_address_note = await probe_bd_address(target)
+                if bd_address_note:
+                    print(f"BD-address query: {bd_address_note}")
+            except RaceProbeError as exc:
+                print(f"BD-address query skipped: {exc}")
+
+            if include_memory_read:
+                await asyncio.sleep(INTER_PROBE_SETTLE_SECONDS)
+                try:
+                    _, memory_read_flags, memory_read_note = await probe_memory_read(
+                        target
+                    )
+                    flags.extend(memory_read_flags)
+                    if memory_read_note:
+                        print(f"Memory-read: {memory_read_note}")
+                except RaceProbeError as exc:
+                    print(f"Memory-read probe skipped: {exc}")
+
+            await asyncio.sleep(INTER_PROBE_SETTLE_SECONDS)
 
             try:
                 version, firmware_flags = await probe_firmware_version(
@@ -324,6 +520,22 @@ async def run_assess(target: str, json_path: str | None) -> None:
                 flags.extend(firmware_flags)
             except RaceProbeError as exc:
                 print(f"Firmware check skipped: {exc}")
+
+            await asyncio.sleep(INTER_PROBE_SETTLE_SECONDS)
+
+            try:
+                gatt_flags, gatt_unreached = await probe_gatt(
+                    target, on_progress=print
+                )
+                flags.extend(gatt_flags)
+                if gatt_unreached:
+                    print(
+                        f"GATT probe incomplete: {gatt_unreached} "
+                        "characteristic(s) never reached after repeated "
+                        "reconnects"
+                    )
+            except GattProbeError as exc:
+                print(f"GATT probe skipped: {exc}")
     except AgentRegistrationError as exc:
         print(f"Assessment aborted: {exc}")
         return
@@ -336,11 +548,17 @@ async def run_assess(target: str, json_path: str | None) -> None:
     result = assess_device(device, flags)
 
     print()
-    print_assessment_result(result, firmware_version=version)
+    print_assessment_result(result, firmware_version=version, bd_address=bd_address)
 
     if json_path:
         with open(json_path, "w") as f:
-            json.dump(assessment_to_dict(result, firmware_version=version), f, indent=2)
+            json.dump(
+                assessment_to_dict(
+                    result, firmware_version=version, bd_address=bd_address
+                ),
+                f,
+                indent=2,
+            )
         print(f"\nWrote assessment to {json_path}")
 
 
@@ -532,6 +750,11 @@ async def _wizard_pick_baseline() -> str | None:
 
 
 async def _wizard_full_analysis() -> None:
+    """Runs the same run_assess the --assess flag uses, so the wizard never
+    drifts out of sync with the flag-based audit - including the
+    memory-read confirmation offer, which was previously wizard-invisible
+    (run_assess defaults include_memory_read to False, and nothing here
+    used to ask)."""
     target = await _wizard_pick_target()
     if target is None:
         return
@@ -540,8 +763,13 @@ async def _wizard_full_analysis() -> None:
         print("Cancelled: ownership not confirmed.")
         return
 
-    print("\nRunning the full vulnerability audit (GATT, RACE, firmware)...")
-    await run_assess(target, json_path=None)
+    include_memory_read = await _confirm_memory_read_async(target)
+
+    probes = "GATT, RACE, BD-address, firmware"
+    if include_memory_read:
+        probes += ", memory-read"
+    print(f"\nRunning the full vulnerability audit ({probes})...")
+    await run_assess(target, json_path=None, include_memory_read=include_memory_read)
 
     print("\nSaving a baseline so future runs can detect changes...")
     await run_baseline(target)
@@ -611,6 +839,10 @@ def main() -> None:
     # gated) visible at the call site, and a new probe flag should follow
     # the same three steps rather than a shared abstraction. --scan and
     # --watch skip the gate entirely since they never connect to anything.
+    # --memory-read (standalone, or combined with --assess) adds a fourth
+    # step: a second, more specific confirmation beyond ownership, since a
+    # success there retrieves real device firmware content rather than just
+    # testing reachability.
     parser = build_parser()
     args = parser.parse_args()
 
@@ -641,13 +873,39 @@ def main() -> None:
         asyncio.run(run_firmware(args.target))
         return
 
+    if args.bd_address:
+        if not args.target:
+            parser.error("--bd-address requires --target ADDR")
+        if not args.yes and not _confirm_authorized(args.target):
+            print("Aborted: ownership not confirmed.")
+            return
+        asyncio.run(run_bd_address(args.target))
+        return
+
     if args.assess:
         if not args.target:
             parser.error("--assess requires --target ADDR")
         if not args.yes and not _confirm_authorized(args.target):
             print("Aborted: ownership not confirmed.")
             return
-        asyncio.run(run_assess(args.target, args.json))
+        if args.memory_read and not args.yes and not _confirm_memory_read(args.target):
+            print("Aborted: memory read not confirmed.")
+            return
+        asyncio.run(
+            run_assess(args.target, args.json, include_memory_read=args.memory_read)
+        )
+        return
+
+    if args.memory_read:
+        if not args.target:
+            parser.error("--memory-read requires --target ADDR")
+        if not args.yes and not _confirm_authorized(args.target):
+            print("Aborted: ownership not confirmed.")
+            return
+        if not args.yes and not _confirm_memory_read(args.target):
+            print("Aborted: memory read not confirmed.")
+            return
+        asyncio.run(run_memory_read(args.target))
         return
 
     if args.baseline:

@@ -91,10 +91,19 @@ Confirmed affected (verified against a physical unit): Sony WF-1000XM3.
 
 Vulnerability assessment (Phases 1-4) answers "can this device be attacked."
 It cannot answer "has this device already been attacked" — that requires
-evidence of what already happened, not just what's possible. True forensic
-confirmation would mean reading device RAM/flash via RACE, which is the
-attack itself (CVE-2025-20702) and stays out of scope (see Out of Scope).
-This tool does not invasively read the earbuds to look for prior tampering.
+evidence of what already happened, not just what's possible. This tool does
+not invasively read the earbuds to look for prior tampering, and compromise
+assessment (Phases 6-7) remains heuristic/drift-based only, never a memory
+read (see Out of Scope).
+
+Phase 8 added a narrow, deliberate exception to this for vulnerability
+confirmation specifically (not compromise/forensic assessment): an opt-in,
+single, fixed-address, read-only RACE flash-page read
+(`probe_memory_read`/`--memory-read`), for when the reachability-only RACE
+probe (`--race`) gets no response and a more definitive CVE-2025-20702
+answer is wanted. This is not "forensic RAM/flash inspection" in the sense
+meant below - it never loops across a range, never accepts a caller-supplied
+address, and is a single bounded confirmation read, not a dumping tool.
 
 Instead, compromise assessment is heuristic and drift-based: capture a
 trusted baseline the first time a device is assessed, then flag deviations
@@ -267,14 +276,180 @@ passive assessment only.
       menu. Each is now imported lazily inside the function that actually
       performs the Bluetooth operation.
 
+## Phase 8 — Opt-In Memory-Read Confirmation (CVE-2025-20702)
+**Target: 2026-07-06**
+
+Added after live testing against this project's own Sony WF-1000XM3 found
+`--race` reachable-but-silent to `GetSDKInfo`, and a `btmon` capture
+confirmed that silence was genuine (not a probe artifact) rather than
+conclusive proof of anything about the device's actual RACE exposure -
+`GetSDKInfo` never touches memory, so a non-response there doesn't rule out
+the actual attack (a memory read) succeeding. Reviewing ERNW's race-toolkit
+source directly confirmed the tool doesn't need a Bumble dongle for this -
+`GATTBleakTransport` sends RACE commands the same way this project already
+does, over the same tx/rx GATT characteristics regardless of transport.
+
+- [x] `RACE_STORAGE_PAGE_READ` (flash page read) implemented in
+      `core/race.py` - flash chosen specifically because it's non-volatile
+      storage with no read wear/side effects, unlike RAM/registers on some
+      architectures (`RACE_READ_ADDRESS` is deliberately not implemented)
+- [x] Fixed test address (`FLASH_READ_TEST_ADDRESS = 0x08000000`) and page
+      size (`0x100` bytes) - the same address ERNW's own `check` command
+      reads, not a caller-supplied address/size; no looping across a range
+- [x] `probe_memory_read` kept fully separate from `probe_race` - a success
+      here means real firmware content was retrieved, a materially
+      different (and more invasive) result than reachability alone
+- [x] Flag `RACE_MEMORY_READ_CONFIRMED` (HIGH) on a well-formed response
+      with `return_code == 0` and non-empty page data; a device that
+      responds but explicitly declines the read raises no flag either -
+      reachable and responsive isn't the same as confirmed disclosure
+- [x] `--memory-read` flag: standalone (`--memory-read --target ADDR`), or
+      combined with `--assess` to add it to the full audit
+- [x] Requires its own explicit confirmation beyond the standard ownership
+      prompt, describing exactly what will happen (a real, read-only flash
+      read) before running - skippable via `--yes` like every other prompt,
+      for scripted use
+- [x] Never exposes Program/Erase/FOTA/GetLinkKey regardless of this flag -
+      those stay out of scope on their own terms (destructive, or key
+      material), not just because this feature is opt-in
+
+## Phase 9 — Augmented Disclosure Surfacing
+**Target: 2026-07-07**
+
+After Phase 8, the user's own framing was that the project's original scope
+had been narrowed out of general caution before the specifics of each
+operation were actually understood - once verified as genuinely read-only
+and no-new-risk, that caution should relax rather than persist by default
+(see the Phase 8 rationale above). This phase applies the same lens to two
+more additions that cost nothing extra against the device, plus a third
+candidate that's scoped but deliberately not built yet.
+
+- [x] Surface actual GATT characteristic values: a successful unpaired read
+      or the first notification payload received during `--gatt`/`--assess`
+      was already happening and then being discarded - `GATT_UNAUTHENTICATED_ACCESS`
+      evidence now includes `value_hex` when a value was retrieved, printed
+      in both `--gatt` and `--assess` output. Zero new device risk - no
+      additional operation is performed, the existing read/subscribe result
+      is just no longer thrown away.
+- [x] `probe_bd_address` / `--bd-address`: queries the device's Bluetooth
+      Classic (BR/EDR) address via RACE (`RACE_GET_BD_ADDRESS`/`0xCD5`,
+      "GetEDRAddress" in race-toolkit's own naming - cross-checked directly
+      against `librace/constants.py` and `librace/packets.py`). Same risk
+      shape as the existing `GetSDKInfo`/`BuildVersion` queries: a
+      zero-payload metadata command, not the flash-read path, so it needs no
+      separate confirmation gate beyond the standard ownership prompt and
+      runs automatically as part of `--assess`. Useful because this tool has
+      no Bluetooth Classic transport of its own (see Hardware requirement
+      note below) - a user pursuing CVE-2025-20701 active testing with their
+      own Classic-capable radio/tooling needs the device's real Classic
+      address first, which this retrieves without a dongle.
+- [ ] Bluetooth Classic (BR/EDR) SDP service discovery - scoped, not built.
+      Would use the BD address from `--bd-address` to browse the device's
+      Classic SDP service records via BlueZ, partially covering the
+      currently 100%-untested Classic/BR-EDR transport side of
+      CVE-2025-20702 exposure without a dongle, since SDP browsing is
+      nominally a query-only protocol like BLE GATT discovery. Deliberately
+      not implemented yet: unlike BLE, where bleak/BlueZ can discover GATT
+      services with no pairing step at all, Bluetooth Classic's
+      connection/security model is more likely to solicit a real pairing
+      prompt just from a Classic connection attempt, depending on the
+      target's IO capability and security settings - and this project has
+      already been surprised once by exactly this shape of problem (Phase
+      5's Fast Pair incident: a GATT probe against an arbitrary nearby
+      device triggered a real pairing PIN prompt via a provisioning-style
+      service, not the RACE/GATT logic itself being at fault). This needs a
+      live side-effect check against a real Classic-capable target before
+      being trusted as unpaired/query-only, the same way Phase 8's flash
+      read and this phase's other two items were verified live rather than
+      assumed safe from source-reading alone - not implemented until that's
+      done.
+
+## Phase 10 — GATT Probe Reconnect Reliability
+**Target: 2026-07-07**
+
+Live `--assess`/wizard testing against the confirmed Sony WF-1000XM3 kept
+failing partway through in ways that looked environmental at first (phone
+Bluetooth interference, device sleep, stuck `bluetoothd` state, bad
+antenna) but turned out to be a specific, reproducible software
+interaction, found via a live `btmon` HCI capture after four ruled-out
+hypotheses.
+
+- [x] Root cause: this device has multiple GATT characteristics that
+      correctly require pairing (ATT `Insufficient Encryption`/
+      `Authentication`/`Authorization`). BlueZ responds to that by
+      automatically attempting SMP pairing to elevate security; this
+      project's `no_pairing_agent` (registered so no real pairing dialog
+      ever reaches the desktop) rejects it by design, and BlueZ then
+      disconnects the *entire* connection a few seconds later - not just
+      the one characteristic - and keeps retrying the same rejected write
+      on every future reconnect for the life of the `bluetoothd` process,
+      regardless of which probe initiates the reconnect.
+- [x] `core/gatt.py:probe_gatt` rebuilt around a reconnect-and-resume
+      design: enumerate the full (service, characteristic, properties)
+      worklist once, then work through it across multiple reconnects if
+      the link drops mid-sweep, resuming from wherever it left off rather
+      than starting over or giving up.
+- [x] Proactive trigger detection instead of reactive: `_probe_characteristic`
+      reports back immediately when a read/notify attempt looks like the
+      security-required pattern above (including a bare `TimeoutError`
+      with no matchable message text, confirmed live to be a real trigger
+      shape on this device), so `probe_gatt` reconnects right away instead
+      of gambling on how many more characteristics happen to complete
+      before BlueZ's own delayed disconnect actually lands.
+- [x] Honest incomplete-result reporting: `probe_gatt` returns
+      `(flags, unreached_count)`; `--gatt` and `--assess` both print an
+      explicit "GATT probe incomplete: N characteristic(s) never reached"
+      rather than letting a partial sweep look indistinguishable from a
+      clean one.
+- [x] A two-tier reconnect budget (unlimited for detected security
+      triggers, small-capped for everything else) was tried and reverted -
+      a reconnect made specifically to recover from a detected trigger can
+      itself fail outright while BlueZ is still unwinding in the
+      background, and that failure doesn't cleanly belong to either
+      bucket. Replaced with one unified `GATT_PROBE_MAX_RECONNECTS`.
+- [x] Progress output: `probe_gatt` takes an optional `on_progress`
+      callback, called before each reconnect attempt. Added after a sweep
+      against a device that went unreachable mid-run took long enough with
+      zero terminal output that it looked hung, even though every
+      individual operation was already bounded by `asyncio.wait_for`.
+- [x] Early bail-out on genuine unreachability: if a reconnect fails to
+      even establish three times in a row (`CONSECUTIVE_CONNECT_FAILURE_BAIL_OUT`),
+      the sweep now stops immediately instead of exhausting the full
+      retry budget against a device that's plainly out of range or
+      powered off.
+- [x] `GATT_PROBE_MAX_RECONNECTS` walked back down (25 to 15) after live
+      testing raised a real, unproven-but-plausible concern that a bigger
+      budget forces the device through more failed pairing negotiations
+      per run, rather than just giving a still-reachable device more
+      chances to finish.
+- [ ] **Open, unresolved**: sweep completeness against the confirmed test
+      device degrades over a session of repeated heavy testing and
+      recovers after the device rests for a few hours. Whether this is a
+      deliberate connection-layer abuse-prevention/backoff mechanism on
+      the device, or just cumulative BLE-stack stress from repeated forced
+      disconnects with no intentional logic behind it, is not resolved -
+      both explain the observed pattern equally well so far. Notably, the
+      unauthenticated GATT reads/notifies that constitute the actual
+      CVE-2025-20700 finding kept succeeding instantly in every run
+      observed, including the most degraded ones - only the
+      connection/reconnect layer showed any sign of throttling, never the
+      underlying vulnerability. Revisiting after further periodic
+      rest-then-test observation.
+
 ---
 
 ## Out of Scope
 
-- Full memory dump or Link Key extraction (crosses into active exploitation)
-- Firmware injection via FOTA (destructive, out of scope for an assessment tool)
+- Full memory dump (looping across an address range, or a caller-supplied
+  address/size) or Link Key extraction (crosses into active exploitation).
+  Phase 8's `--memory-read` is deliberately not this: one fixed address, one
+  fixed page, read-only, opt-in - see Phase 8 and the note above.
+- RAM/register reads (`RACE_READ_ADDRESS`) - some architectures alias RAM
+  addresses to memory-mapped I/O with side effects on read, unlike flash
+- Program/Erase/FOTA commands (destructive - can permanently brick a
+  device, per ERNW's own race-toolkit README)
 - Worm simulation
 - Any testing against devices not owned or explicitly authorised by the user
-- Forensic RAM/flash inspection for definitive compromise confirmation
-  (would require performing the exploit itself); compromise assessment
-  (Phases 6-7) is heuristic/drift-based only, never a memory read
+- Forensic RAM/flash inspection for definitive compromise confirmation;
+  compromise assessment (Phases 6-7) is heuristic/drift-based only, never a
+  memory read - Phase 8 is scoped to vulnerability confirmation only

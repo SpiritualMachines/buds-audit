@@ -4,7 +4,9 @@ Connection/read/notify behaviour in core/gatt.py needs a live BLE peripheral
 and isn't covered here - only the flag-construction logic.
 """
 
-from core.gatt import _make_flag
+from bleak.exc import BleakDBusError, BleakError
+
+from core.gatt import _is_security_required_error, _make_flag
 
 
 def test_make_flag_read_access():
@@ -35,3 +37,50 @@ def test_make_flag_notify_access_records_properties():
 
     assert flag.evidence["access"] == "notify"
     assert flag.evidence["properties"] == ["notify", "indicate"]
+
+
+def test_make_flag_omits_value_hex_when_no_value_given():
+    flag = _make_flag(
+        "0000180a-0000-1000-8000-00805f9b34fb",
+        "00002a29-0000-1000-8000-00805f9b34fb",
+        "notify",
+        ["notify"],
+    )
+
+    assert "value_hex" not in flag.evidence
+
+
+def test_make_flag_records_value_hex_when_value_given():
+    flag = _make_flag(
+        "0000180a-0000-1000-8000-00805f9b34fb",
+        "00002a29-0000-1000-8000-00805f9b34fb",
+        "read",
+        ["read"],
+        value=b"\x01\x02\xaa",
+    )
+
+    assert flag.evidence["value_hex"] == "0102aa"
+
+
+def test_is_security_required_error_true_for_insufficient_encryption():
+    # Raw, un-expanded detail text, matching what BlueZ actually sends -
+    # BleakDBusError expands "0x0f" into "(Insufficient Encryption)" itself.
+    exc = BleakDBusError("org.bluez.Error.Failed", ["ATT error: 0x0f"])
+
+    assert _is_security_required_error(exc) is True
+
+
+def test_is_security_required_error_true_for_insufficient_authentication():
+    exc = BleakDBusError("org.bluez.Error.Failed", ["ATT error: 0x05"])
+
+    assert _is_security_required_error(exc) is True
+
+
+def test_is_security_required_error_false_for_unrelated_error():
+    exc = BleakError("device not found")
+
+    assert _is_security_required_error(exc) is False
+
+
+def test_is_security_required_error_false_for_timeout():
+    assert _is_security_required_error(TimeoutError("timed out")) is False
