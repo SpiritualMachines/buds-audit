@@ -118,6 +118,41 @@ async def is_paired(address: str) -> bool:
     return (await get_bonding_state(address))["paired"]
 
 
+async def _remove_device(address: str) -> None:
+    """Force BlueZ to drop every cached object for this device
+    (org.bluez.Adapter1.RemoveDevice, via bluetoothctl for consistency with
+    get_bonding_state's own bluetoothctl use).
+
+    Confirmed live via btmon: a rejected StartNotify on a pairing-required
+    characteristic makes BlueZ record the "wants notifications" intent even
+    though the CCCD write failed, then re-issue that same write autonomously
+    on every subsequent connection to this device - before any of this
+    module's own code runs - re-triggering the failed-pairing-then-forced-
+    disconnect cycle. StopNotify does not clear that intent: the
+    subscription never succeeded, so there is nothing for it to reverse.
+    Removing the device object destroys the retained intent along with the
+    rest of BlueZ's cache, so the next connection is genuinely fresh. Cost
+    is a full re-discovery on the next connect; the benefit is that the
+    sweep stops racing BlueZ's background re-write, which is the difference
+    between a deterministic result and a random one.
+
+    Best-effort: it never raises. A removal failure (device already gone,
+    bluetoothctl missing) just leaves us where we already were, and the
+    reconnect logic tolerates that.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bluetoothctl",
+            "remove",
+            address,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+    except OSError:
+        pass
+
+
 @asynccontextmanager
 async def _unpaired_connection(address: str, timeout: float, action: str):
     if await is_paired(address):
@@ -394,6 +429,18 @@ async def probe_gatt(
 
     for attempt in range(GATT_PROBE_MAX_RECONNECTS + 1):
         if attempt > 0:
+            # Clear BlueZ's retained per-characteristic notify intent before
+            # reconnecting - see _remove_device. Without this, each reconnect
+            # races BlueZ's autonomous re-write of the rejected CCCD, and how
+            # far the sweep gets before that background write kills the link
+            # is pure timing luck: the source of the run-to-run randomness in
+            # completeness (26 characteristics one run, 2 the next, same
+            # device, same conditions). Runs before every reconnect, not just
+            # security-triggered ones - a removal is harmless on a plain
+            # connect-failure reconnect (it just forces the re-discovery that
+            # was going to happen anyway) and this keeps the recovery path
+            # uniform rather than branching on why the last attempt failed.
+            await _remove_device(address)
             if on_progress:
                 remaining = len(pending) if pending is not None else "?"
                 on_progress(

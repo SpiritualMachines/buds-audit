@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.9.1
+
+- Fixed the long-standing run-to-run randomness in GATT sweep completeness
+  against devices with pairing-required characteristics (the confirmed test
+  device returned anywhere from 2 to 26 findings across otherwise-identical
+  runs, with occasional "0 of N" complete failures). Fresh `btmon` HCI
+  captures, read against the probe code, traced it to BlueZ: when a
+  `StartNotify` on a characteristic that requires pairing is rejected (ATT
+  `Insufficient Encryption`), BlueZ records the "wants notifications" intent
+  anyway and re-issues that CCCD write autonomously on every subsequent
+  connection to the device - before `probe_gatt`'s own worklist runs -
+  re-triggering the failed-pairing-then-forced-disconnect cycle. The 0.8.3
+  `StopNotify`-in-`finally` mitigation couldn't clear it: the subscription
+  never succeeded, so there was nothing for `StopNotify` to reverse.
+- Added `_remove_device` (`core/gatt.py`): clears BlueZ's entire cached
+  record of the device (`bluetoothctl remove`, i.e.
+  `org.bluez.Adapter1.RemoveDevice`), called before every reconnect in
+  `probe_gatt`. Destroying the device object destroys the retained notify
+  intent along with it, so each reconnect starts from a genuinely clean
+  state and no longer races BlueZ's background re-write. Best-effort and
+  never raises; the cost is a full re-discovery on the next connect,
+  absorbed by the existing reconnect settle delay.
+- Verified live against the confirmed Sony WF-1000XM3: three consecutive
+  `--assess` runs each returned an identical complete result (27
+  `GATT_UNAUTHENTICATED_ACCESS` findings) with only two reconnects each,
+  despite enumerating the characteristic worklist in three different orders
+  - completeness no longer depends on where the pairing-required
+  characteristics happen to fall in the sweep, which is what previously
+  produced the wild swings. This resolves the "degrades over a session,
+  recovers with rest" observation left open in 0.9.0, now attributed to the
+  same retained-state accumulation rather than device fatigue.
+- Recorded the confirmed test unit's observed firmware version (3.1.2,
+  released 2021-04-15 per Sony's release notes - four years before the 2025
+  Airoha disclosure, with no newer version found) as explicit
+  `observed_firmware` / `observed_firmware_release_date` fields in
+  `data/affected_devices.json`. This is an out-of-band data point read from
+  the Sony Headphones Connect app, distinct from the RACE `BuildVersion`
+  query (which this unit doesn't answer), and doesn't change any assessment
+  logic.
+
 ## 0.9.0
 
 - A fresh `--assess` after letting the confirmed test device rest for six

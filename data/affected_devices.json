@@ -7,7 +7,9 @@
       "airoha_soc": "AB1562",
       "cves": ["CVE-2025-20700", "CVE-2025-20701", "CVE-2025-20702"],
       "patched_firmware": null,
-      "notes": "TWS earbuds; confirmed affected by ERNW advisory. Address prefix verified by live BLE scan against a physical test unit (advertises as LE_WF-1000XM3)."
+      "observed_firmware": "3.1.2",
+      "observed_firmware_release_date": "2021-04-15",
+      "notes": "TWS earbuds; confirmed affected by ERNW advisory. Address prefix verified by live BLE scan against a physical test unit (advertises as LE_WF-1000XM3). Test unit is running firmware 3.1.2, read from the Sony Headphones Connect app's device info screen (RACE's own BuildVersion query gets no response on this unit, so this value isn't tool-derived). Per Sony's own release notes, 3.1.2 shipped 2021-04-15 - four years before the 2025 Airoha disclosure - and no newer version has been found as of 2026-07-08 - this model may no longer receive firmware updates at all."
     }
   ]
 }

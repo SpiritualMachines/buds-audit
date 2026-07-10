@@ -422,19 +422,26 @@ hypotheses.
       budget forces the device through more failed pairing negotiations
       per run, rather than just giving a still-reachable device more
       chances to finish.
-- [ ] **Open, unresolved**: sweep completeness against the confirmed test
-      device degrades over a session of repeated heavy testing and
-      recovers after the device rests for a few hours. Whether this is a
-      deliberate connection-layer abuse-prevention/backoff mechanism on
-      the device, or just cumulative BLE-stack stress from repeated forced
-      disconnects with no intentional logic behind it, is not resolved -
-      both explain the observed pattern equally well so far. Notably, the
-      unauthenticated GATT reads/notifies that constitute the actual
-      CVE-2025-20700 finding kept succeeding instantly in every run
-      observed, including the most degraded ones - only the
-      connection/reconnect layer showed any sign of throttling, never the
-      underlying vulnerability. Revisiting after further periodic
-      rest-then-test observation.
+- [x] **Resolved 2026-07-09**: the run-to-run randomness in sweep
+      completeness (26 characteristics one run, 2 the next, and occasional
+      "0 of N" runs) was traced, via fresh `btmon` captures read against the
+      probe code, to BlueZ retaining the rejected characteristic's "wants
+      notifications" intent and re-issuing that CCCD write autonomously on
+      every subsequent connection - before the probe's own worklist runs.
+      `StopNotify` can't clear it (the subscription never succeeded, so
+      there's nothing to reverse). Fixed with a new `_remove_device` helper
+      (`bluetoothctl remove`, i.e. `org.bluez.Adapter1.RemoveDevice`) called
+      before every reconnect, destroying the retained intent so each
+      reconnect starts fresh. Verified live: three consecutive `--assess`
+      runs each returned an identical complete result (27 GATT findings)
+      despite enumerating the worklist in three different orders -
+      completeness no longer depends on where the pairing-required
+      characteristics fall in the sweep. The earlier "degrades over a
+      session, recovers with rest" observation did not recur across those
+      back-to-back runs and is now attributed to the same retained-state
+      accumulation, not device fatigue or deliberate throttling. Throughout,
+      the unauthenticated reads/notifies that constitute the CVE-2025-20700
+      finding continued to succeed instantly, as in every prior run.
 
 ---
 

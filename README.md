@@ -1,6 +1,6 @@
 # buds-audit
 
-**Version 0.9.0**
+**Version 0.9.1**
 
 Bluetooth security assessment tool for wireless earbuds affected by the
 Airoha SDK vulnerability chain (CVE-2025-20700 / CVE-2025-20701 /
@@ -105,14 +105,16 @@ The GATT probe (`--gatt`, and the GATT stage of `--assess`) can need several
 reconnects if the device has characteristics that require pairing - each one
 makes BlueZ attempt (and this tool's own agent reject) a real pairing
 negotiation before reconnecting to resume the sweep, and prints a one-line
-status before each attempt so a slow sweep doesn't look hung. Live testing
-against the confirmed test device also saw completeness degrade over a
-single session of repeated heavy testing, recovering after the device was
-left to rest for a few hours - whether that's the device's own connection-
-layer throttling or just cumulative BLE-stack stress from repeated forced
-disconnects isn't resolved yet. If a sweep comes back with fewer findings
-than a previous run against the same device, try again after giving it a
-rest before assuming something changed.
+status before each attempt so a slow sweep doesn't look hung. When such a
+subscription is rejected, BlueZ retains the intent and re-issues it on every
+later connection to that device; to stop that from derailing subsequent
+reconnects, the probe clears BlueZ's cached record of the device (equivalent
+to `bluetoothctl remove`) before each reconnect, so every attempt starts from
+a clean state. With that in place, repeated back-to-back sweeps against the
+confirmed test device return the same complete result each time. An earlier
+observation - completeness appearing to degrade over a session of heavy
+testing and recover after a rest - has not recurred since, and is believed to
+have been the same retained-state accumulation rather than device fatigue.
 
 ## Interactive mode
 
