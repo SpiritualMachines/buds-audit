@@ -6,7 +6,11 @@ since it's just static guidance, not logic.
 """
 
 from core.models import AssessmentResult, BtDevice, RuleFlag
-from core.report import _group_flags_by_severity, print_assessment_result
+from core.report import (
+    _group_flags_by_severity,
+    assessment_to_dict,
+    print_assessment_result,
+)
 
 
 def _flag(flag_id: str, severity: str, **evidence) -> RuleFlag:
@@ -107,3 +111,30 @@ def test_print_assessment_result_single_instance_shows_full_description(capsys):
     output = capsys.readouterr().out
     assert "RACE_EXPOSED description" in output
     assert "instance(s)" not in output
+
+
+def test_print_assessment_result_includes_distilled_layer(capsys):
+    # The distilled, non-technical interpretation renders both at the verdict
+    # level and per finding, alongside (not instead of) the technical detail.
+    device = BtDevice(address="AA:BB:CC:DD:EE:FF", name=None, rssi=None, transport="le")
+    flags = [_flag("GATT_UNAUTHENTICATED_ACCESS", "MEDIUM", access="read")]
+    result = AssessmentResult(device=device, verdict="PARTIAL", flags=flags)
+
+    print_assessment_result(result)
+
+    output = capsys.readouterr().out
+    assert "What this means:" in output
+    assert "In plain terms:" in output
+
+
+def test_assessment_to_dict_carries_distilled_layer():
+    # The JSON export (which feeds downstream/HTML output) carries the same
+    # plain-language layer so it is not stdout-only.
+    device = BtDevice(address="AA:BB:CC:DD:EE:FF", name=None, rssi=None, transport="le")
+    flags = [_flag("GATT_UNAUTHENTICATED_ACCESS", "MEDIUM", access="read")]
+    result = AssessmentResult(device=device, verdict="PARTIAL", flags=flags)
+
+    exported = assessment_to_dict(result)
+
+    assert exported["verdict_explanation"]
+    assert exported["flags"][0]["plain_language"]

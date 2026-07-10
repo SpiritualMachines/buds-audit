@@ -1,6 +1,6 @@
 # buds-audit
 
-**Version 0.9.1**
+**Version 1.0.0**
 
 Bluetooth security assessment tool for wireless earbuds affected by the
 Airoha SDK vulnerability chain (CVE-2025-20700 / CVE-2025-20701 /
@@ -8,6 +8,8 @@ CVE-2025-20702). Scans for nearby devices, fingerprints known-affected
 Airoha-based chipsets, and probes for unauthenticated GATT access and RACE
 protocol reachability - entirely through the OS Bluetooth stack (BlueZ) via
 `bleak`. No external Bluetooth dongle is required and root is not needed.
+Results are reported in plain language alongside the technical detail, so you
+can act on them without deep Bluetooth knowledge.
 
 ## Ethical use statement
 
@@ -233,8 +235,13 @@ buds_audit.py --assess --target AA:BB:CC:DD:EE:FF --memory-read
 
 Runs the GATT, RACE, firmware, and BD-address probes above against one
 target and produces a single verdict: `PASS`, `PARTIAL`, `VULNERABLE`, or
-`SUSPECTED_COMPROMISE`. `--json` additionally writes the full result
-(device info, verdict, flags, evidence, remediation notes) to a file.
+`SUSPECTED_COMPROMISE`. The verdict and every individual finding are printed
+with a plain-language interpretation next to the technical detail, so the
+result is readable without deep Bluetooth knowledge - this tool is meant for
+anyone checking their own devices, not only security specialists. `--json`
+additionally writes the full result (device info, verdict and its plain-
+language explanation, flags with evidence and their plain-language gloss, and
+remediation notes) to a file.
 Adding `--memory-read` folds the memory-read confirmation into the same
 audit and verdict, with its own separate confirmation prompt first. The
 BD-address query runs automatically as part of `--assess` (no separate flag

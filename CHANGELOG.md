@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.0
+
+First stable release.
+
+- Added a plain-language layer to the assessment report so a non-expert can
+  understand the result, not just a security specialist - this tool is meant
+  to let the public check their own devices. Each verdict now prints a "What
+  this means" interpretation, and every finding prints an "In plain terms"
+  gloss next to the existing technical detail and remediation. The wording is
+  deliberately neither alarmist nor falsely reassuring: it states what was
+  observed and what to do about it, without implying an attack the tool did
+  not actually confirm.
+- The same plain-language layer is included in the `--json` export
+  (`verdict_explanation` at the top level, `plain_language` per flag), so
+  downstream and archival output carries it too, not just stdout.
+- Guidance text (verdict interpretation, plain-language, remediation) now
+  wraps with a hanging indent instead of soft-wrapping back to the left
+  margin, so multi-sentence guidance stays readable in a terminal.
+
 ## 0.9.1
 
 - Fixed the long-standing run-to-run randomness in GATT sweep completeness

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import textwrap
+
 from core.models import AssessmentResult, BtDevice, RuleFlag
 
 # Remediation guidance per flag_id.
@@ -63,6 +65,114 @@ REMEDIATION = {
         "request as a compromise indicator."
     ),
 }
+
+# Plain-language interpretation of the overall verdict, printed right under it
+# so the bottom line ("what does this mean for me") reaches a non-expert
+# before the technical findings do. This tool is meant to let the public
+# check their own devices, not just security specialists - see core/rules.py
+# for how each verdict is decided. Wording is deliberately neither alarmist
+# nor falsely reassuring: it says what was observed and what to do, without
+# implying an attack this tool did not actually confirm.
+VERDICT_EXPLANATION = {
+    "PASS": (
+        "No issues found. This device is not on the known-affected list and "
+        "did not respond to any of the unauthenticated checks this tool runs. "
+        "Nothing further is needed."
+    ),
+    "PARTIAL": (
+        "Some exposure worth knowing about, but no active attack was "
+        "confirmed. Usually this means the device is a known-vulnerable model "
+        "and/or answered requests it ideally should not have from an unpaired "
+        "scanner like this one. The main defense is a manufacturer firmware "
+        "update, if one exists. See the findings and their remediation notes "
+        "below."
+    ),
+    "VULNERABLE": (
+        "This device has a high-severity exposure a nearby attacker could "
+        "realistically use. The most important step is to install any "
+        "firmware update the manufacturer has released; if there is none, be "
+        "cautious about using the device around untrusted people or unknown "
+        "Bluetooth devices. See the findings below."
+    ),
+    "SUSPECTED_COMPROMISE": (
+        "Something about this device changed in a way that can indicate "
+        "tampering or impersonation since your last trusted scan. This does "
+        "not prove an attack, but it is worth taking seriously - confirm the "
+        "device is really yours and physically present before trusting it "
+        "again. See the findings below."
+    ),
+}
+
+# One-sentence plain-language gloss per flag_id, printed alongside the
+# technical finding. Same tone rule as VERDICT_EXPLANATION above: describe
+# what happened and why it matters in everyday terms, without overstating it.
+PLAIN_LANGUAGE = {
+    "GATT_UNAUTHENTICATED_ACCESS": (
+        "This device handed data to this scanner without any pairing or "
+        "approval. On its own that is an information exposure, not a takeover "
+        "- but it is the kind of open access the Airoha attacks build on."
+    ),
+    "RACE_EXPOSED": (
+        "A hidden manufacturer debug channel answered commands from an "
+        "unpaired scanner. That channel is what these CVEs abuse - it should "
+        "not be reachable without pairing."
+    ),
+    "RACE_MEMORY_READ_CONFIRMED": (
+        "This scanner read raw memory off the device without pairing. That is "
+        "direct proof of the memory-disclosure vulnerability, not just a "
+        "reachable channel."
+    ),
+    "CLASSIC_PAIRING_BYPASS_UNPATCHED": (
+        "This device's firmware is old enough to be vulnerable to a Bluetooth "
+        "pairing bypass, where an attacker pairs with it without your "
+        "approval."
+    ),
+    "CLASSIC_PAIRING_BYPASS_UNKNOWN": (
+        "This is a known-affected model, but the tool could not read its "
+        "firmware version to tell whether it has been patched. Treat it as "
+        "unpatched until you can confirm otherwise."
+    ),
+    "IDENTITY_DRIFT": (
+        "This device is advertising a different name or maker info than the "
+        "last time you scanned it. If you did not change anything, it could "
+        "be a different device posing as yours."
+    ),
+    "GATT_TABLE_DRIFT": (
+        "The internal layout of this device changed since your last trusted "
+        "scan. That can simply be a firmware update - or a sign something "
+        "reconfigured it."
+    ),
+    "FIRMWARE_DOWNGRADE": (
+        "This device's firmware version went backwards since your last scan. "
+        "A downgrade can be a setup step for an attack."
+    ),
+    "BOND_STATE_DRIFT": (
+        "This device's pairing record changed without you re-pairing it, "
+        "which can indicate a silent, unauthorized pairing."
+    ),
+    "POSSIBLE_IMPERSONATION": (
+        "Two devices in range are broadcasting the same identity. One may be "
+        "impersonating your real device - do not pair until you know which is "
+        "which."
+    ),
+}
+
+_WRAP_WIDTH = 78
+
+
+def _print_labeled(label: str, text: str, indent: str = "    ") -> None:
+    """Print a labeled guidance paragraph wrapped with a hanging indent, so
+    the distilled non-technical text (verdict interpretation, per-finding
+    plain-language, remediation) stays readable in a terminal instead of
+    soft-wrapping back to the left margin mid-sentence."""
+    print(
+        textwrap.fill(
+            f"{label}{text}",
+            width=_WRAP_WIDTH,
+            initial_indent=indent,
+            subsequent_indent=indent,
+        )
+    )
 
 
 def print_scan_results(devices: list[BtDevice], flags_only: bool = False) -> None:
@@ -225,6 +335,10 @@ def _print_flag_group(group: list[RuleFlag]) -> None:
     count_label = f" - {len(group)} instance(s)" if len(group) > 1 else ""
     print(f"  [{sample.severity}] {sample.flag_id} ({sample.cve}){count_label}")
 
+    plain = PLAIN_LANGUAGE.get(sample.flag_id)
+    if plain:
+        _print_labeled("In plain terms: ", plain)
+
     if len(group) == 1:
         print(f"    {sample.description}")
         value_hex = sample.evidence.get("value_hex") or sample.evidence.get(
@@ -253,7 +367,7 @@ def _print_flag_group(group: list[RuleFlag]) -> None:
 
     remediation = REMEDIATION.get(sample.flag_id)
     if remediation:
-        print(f"    remediation: {remediation}")
+        _print_labeled("remediation: ", remediation)
 
 
 def print_assessment_result(
@@ -274,6 +388,11 @@ def print_assessment_result(
 
     if bd_address is not None:
         print(f"  BD address (Classic): {bd_address}")
+
+    explanation = VERDICT_EXPLANATION.get(result.verdict)
+    if explanation:
+        print()
+        _print_labeled("What this means: ", explanation, indent="  ")
 
     if not result.flags:
         print("  no findings")
@@ -326,6 +445,7 @@ def assessment_to_dict(
         "firmware_version": firmware_version,
         "bd_address": bd_address,
         "verdict": result.verdict,
+        "verdict_explanation": VERDICT_EXPLANATION.get(result.verdict),
         "flags": [
             {
                 "flag_id": flag.flag_id,
@@ -334,6 +454,7 @@ def assessment_to_dict(
                 "cve": flag.cve,
                 "evidence": flag.evidence,
                 "remediation": REMEDIATION.get(flag.flag_id),
+                "plain_language": PLAIN_LANGUAGE.get(flag.flag_id),
             }
             for flag in result.flags
         ],
