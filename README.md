@@ -85,6 +85,33 @@ Linux only, and not automatically every Linux system:
   bus (SDIO/PCIe, alongside Wi-Fi), which `usbipd-win` generally can't
   forward - so this depends entirely on the specific hardware.
 
+### Running it from Windows or macOS
+
+You don't need a Linux machine of your own - you just need Linux with real
+access to a Bluetooth radio. Two practical ways to get that:
+
+- **Boot Fedora from a live USB (easiest, recommended).** A Fedora live USB
+  runs the whole OS off the stick without installing anything, on bare
+  metal - so it has direct access to *all* your hardware, including the
+  laptop's built-in Bluetooth. Boot it, install the dependencies (see
+  Installation), run the tool, reboot back into your normal OS when you're
+  done. Nothing is written to your disk. This is the least fiddly option
+  for occasionally checking your own devices.
+- **A Fedora VM with a USB Bluetooth dongle passed through.** If you'd
+  rather keep a persistent install, run Fedora in a VM (VirtualBox with the
+  Extension Pack, or VMware Workstation/Fusion - these handle per-device USB
+  passthrough cleanly; Hyper-V does not). The catch is the adapter: a VM
+  generally *cannot* borrow your laptop's built-in Bluetooth, so pass
+  through a cheap external USB Bluetooth dongle (4.0+, a Linux-friendly
+  chipset like CSR8510, Realtek RTL8761B, or Intel) instead. Once Fedora
+  sees that dongle, BlueZ drives it directly and the tool works exactly as
+  on bare metal. On Apple Silicon Macs, run the ARM64 build of Fedora (the
+  tool is architecture-agnostic) and use a hypervisor that supports USB
+  passthrough, such as UTM.
+
+Either way, the rule is the same: the tool itself is unchanged - it just
+needs Linux with a Bluetooth adapter BlueZ can actually reach.
+
 ## A note on device power state
 
 Many TWS earbuds stop advertising (and drop any active connection) after a
